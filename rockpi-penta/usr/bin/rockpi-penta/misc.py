@@ -94,18 +94,38 @@ def read_conf():
     return conf
 
 
+def _get_button_bias():
+    bias_name = os.environ.get('BUTTON_BIAS', 'pull_up').lower()
+    bias_map = {
+        'pull_up': gpiod.line.Bias.PULL_UP,
+        'pull_down': gpiod.line.Bias.PULL_DOWN,
+        'disabled': gpiod.line.Bias.DISABLED,
+        'as_is': gpiod.line.Bias.AS_IS,
+    }
+    return bias_map.get(bias_name, gpiod.line.Bias.PULL_UP)
+
+
 def read_key(pattern, size):
-    CHIP_NAME = os.environ['BUTTON_CHIP']
-    LINE_NUMBER = os.environ['BUTTON_LINE']
+    chip_name = os.environ['BUTTON_CHIP']
+    if not chip_name.startswith('/dev/'):
+        chip_name = f'/dev/gpiochip{chip_name}'
+    line_offset = int(os.environ['BUTTON_LINE'])
 
     s = ''
-    chip = gpiod.Chip(str(CHIP_NAME))
-    line = chip.get_line(int(LINE_NUMBER))
-    line.request(consumer='hat_button', type=gpiod.LINE_REQ_DIR_OUT)
-    line.set_value(1)
+    line_request = gpiod.request_lines(
+        chip_name,
+        consumer='hat_button',
+        config={
+            line_offset: gpiod.LineSettings(
+                direction=gpiod.line.Direction.INPUT,
+                bias=_get_button_bias()
+            )
+        }
+    )
 
     while True:
-        s = s[-size:] + str(line.get_value())
+        value = line_request.get_value(line_offset)
+        s = s[-size:] + ('1' if value == gpiod.line.Value.ACTIVE else '0')
         for t, p in pattern.items():
             if p.match(s):
                 return t
