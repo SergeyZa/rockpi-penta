@@ -105,34 +105,11 @@ def _get_button_bias():
     return bias_map.get(bias_name, gpiod.line.Bias.PULL_UP)
 
 
-def read_key(pattern, size):
+def watch_key(q=None):
     chip_name = os.environ['BUTTON_CHIP']
     if not chip_name.startswith('/dev/'):
         chip_name = f'/dev/gpiochip{chip_name}'
     line_offset = int(os.environ['BUTTON_LINE'])
-
-    s = ''
-    line_request = gpiod.request_lines(
-        chip_name,
-        consumer='hat_button',
-        config={
-            line_offset: gpiod.LineSettings(
-                direction=gpiod.line.Direction.INPUT,
-                bias=_get_button_bias()
-            )
-        }
-    )
-
-    while True:
-        value = line_request.get_value(line_offset)
-        s = s[-size:] + ('1' if value == gpiod.line.Value.ACTIVE else '0')
-        for t, p in pattern.items():
-            if p.match(s):
-                return t
-        time.sleep(0.1)
-
-
-def watch_key(q=None):
     size = int(conf['time']['press'] * 10)
     wait = int(conf['time']['twice'] * 10)
     pattern = {
@@ -141,8 +118,26 @@ def watch_key(q=None):
         'press': re.compile(r'1+0{%d,}' % size),
     }
 
-    while True:
-        q.put(read_key(pattern, size))
+    with gpiod.request_lines(
+        chip_name,
+        consumer='hat_button',
+        config={
+            line_offset: gpiod.LineSettings(
+                direction=gpiod.line.Direction.INPUT,
+                bias=_get_button_bias()
+            )
+        }
+    ) as line_request:
+        s = ''
+        while True:
+            value = line_request.get_value(line_offset)
+            s = s[-size:] + ('1' if value == gpiod.line.Value.ACTIVE else '0')
+            for t, p in pattern.items():
+                if p.match(s):
+                    q.put(t)
+                    s = ''
+                    break
+            time.sleep(0.1)
 
 
 def get_disk_info(cache={}):
