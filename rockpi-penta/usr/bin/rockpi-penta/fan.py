@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 import os.path
 import time
-import traceback
 import threading
 
 import gpiod
 
 import misc
+from logutil import get_logger
+
+logger = get_logger(__name__)
 
 pin = None
 
@@ -24,8 +26,7 @@ class Pwm:
             with open(f"/sys/class/pwm/{chip}/export", 'w') as f:
                 f.write('0')
         except OSError:
-            print("Waring: init pwm error")
-            traceback.print_exc()
+            logger.exception('Warning: init pwm error for chip=%s', chip)
 
     def period(self, ns: int):
         self.period_value = ns
@@ -90,8 +91,11 @@ def get_dc(cache={}):
         return 0.999
 
     if time.time() - cache.get('time', 0) > 60:
+        temp = read_temp()
+        dc = misc.fan_temp2dc(temp)
         cache['time'] = time.time()
-        cache['dc'] = misc.fan_temp2dc(read_temp())
+        cache['dc'] = dc
+        logger.debug('Fan reading: temp_c=%.2f target_dc=%.3f run=%s', temp, dc, bool(misc.conf['run'].value))
 
     return cache['dc']
 
@@ -100,17 +104,23 @@ def change_dc(dc, cache={}):
     if dc != cache.get('dc'):
         cache['dc'] = dc
         pin.write(dc)
+        logger.debug('Fan output updated: duty_cycle=%.3f', dc)
 
 
 def running():
     global pin
     if os.environ['HARDWARE_PWM'] == '1':
         chip = os.environ['PWMCHIP']
+        logger.info('Fan init: mode=hardware pwmchip=%s period_us=40', chip)
         pin = Pwm(chip)
         pin.period_us(40)
         pin.enable(True)
     else:
+        chip_path = os.environ['FAN_CHIP']
+        line_offset = os.environ['FAN_LINE']
+        logger.info('Fan init: mode=software chip=%s line=%s period_s=0.025', chip_path, line_offset)
         pin = Gpio(0.025)
+    logger.info('Fan initialization completed')
     while True:
         change_dc(get_dc())
         time.sleep(1)
