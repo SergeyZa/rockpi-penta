@@ -4,11 +4,14 @@ import os
 import time
 import subprocess
 import multiprocessing as mp
-import traceback
 
 import gpiod
 from configparser import ConfigParser
 from collections import defaultdict, OrderedDict
+
+from logutil import get_logger, setup_logging
+
+logger = get_logger(__name__)
 
 cmds = {
     'blk': "lsblk | awk '{print $1}'",
@@ -71,8 +74,9 @@ def read_conf():
         conf['slider']['time'] = cfg.getfloat('slider', 'time')
         conf['oled']['rotate'] = cfg.getboolean('oled', 'rotate')
         conf['oled']['f-temp'] = cfg.getboolean('oled', 'f-temp')
+        conf['log']['level'] = cfg.get('log', 'level', fallback='INFO')
     except Exception:
-        traceback.print_exc()
+        logger.exception('Failed to read /etc/rockpi-penta.conf, using defaults')
         # fan
         conf['fan']['lv0'] = 35
         conf['fan']['lv1'] = 40
@@ -90,6 +94,7 @@ def read_conf():
         conf['slider']['time'] = 10  # second
         conf['oled']['rotate'] = False
         conf['oled']['f-temp'] = False
+        conf['log']['level'] = 'INFO'
 
     return conf
 
@@ -110,6 +115,8 @@ def watch_key(q=None):
     if not chip_name.startswith('/dev/'):
         chip_name = f'/dev/gpiochip{chip_name}'
     line_offset = int(os.environ['BUTTON_LINE'])
+    bias_name = os.environ.get('BUTTON_BIAS', 'pull_up').lower()
+    bias = _get_button_bias()
     size = int(conf['time']['press'] * 10)
     wait = int(conf['time']['twice'] * 10)
     pattern = {
@@ -118,13 +125,22 @@ def watch_key(q=None):
         'press': re.compile(r'1+0{%d,}' % size),
     }
 
+    logger.info(
+        'Button watcher init: chip=%s line=%s bias=%s press_window=%s twice_window=%s',
+        chip_name,
+        line_offset,
+        bias_name,
+        size,
+        wait,
+    )
+
     with gpiod.request_lines(
         chip_name,
         consumer='hat_button',
         config={
             line_offset: gpiod.LineSettings(
                 direction=gpiod.line.Direction.INPUT,
-                bias=_get_button_bias()
+                bias=bias
             )
         }
     ) as line_request:
@@ -134,6 +150,7 @@ def watch_key(q=None):
             s = s[-size:] + ('1' if value == gpiod.line.Value.ACTIVE else '0')
             for t, p in pattern.items():
                 if p.match(s):
+                    logger.debug('Button event detected: %s', t)
                     q.put(t)
                     s = ''
                     break
@@ -180,3 +197,13 @@ def get_func(key):
 
 conf = {'disk': [], 'idx': mp.Value('d', -1), 'run': mp.Value('d', 1)}
 conf.update(read_conf())
+setup_logging(conf['log']['level'])
+logger.info(
+    'Config loaded: fan=%s key=%s time=%s slider=%s oled=%s log.level=%s',
+    dict(conf['fan']),
+    dict(conf['key']),
+    dict(conf['time']),
+    dict(conf['slider']),
+    dict(conf['oled']),
+    conf['log']['level'],
+)
