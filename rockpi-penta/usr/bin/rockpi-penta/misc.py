@@ -26,6 +26,19 @@ cmds = {
 lv2dc = OrderedDict({'lv3': 0, 'lv2': 0.25, 'lv1': 0.5, 'lv0': 0.75})
 
 
+def _normalize_fan_source(source):
+    source = str(source).strip().lower()
+    if source in ('cpu', 'disk'):
+        return source
+    return 'cpu'
+
+
+def _parse_disk_list(value):
+    if not value:
+        return []
+    return [item.strip() for item in value.split(',') if item.strip()]
+
+
 def check_output(cmd):
     return subprocess.check_output(cmd, shell=True).decode().strip()
 
@@ -62,6 +75,8 @@ def read_conf():
         conf['fan']['lv1'] = cfg.getfloat('fan', 'lv1')
         conf['fan']['lv2'] = cfg.getfloat('fan', 'lv2')
         conf['fan']['lv3'] = cfg.getfloat('fan', 'lv3')
+        conf['fan']['source'] = _normalize_fan_source(cfg.get('fan', 'source', fallback='cpu'))
+        conf['fan']['disk'] = _parse_disk_list(cfg.get('fan', 'disk', fallback=''))
         # key
         conf['key']['click'] = cfg.get('key', 'click')
         conf['key']['twice'] = cfg.get('key', 'twice')
@@ -82,6 +97,8 @@ def read_conf():
         conf['fan']['lv1'] = 40
         conf['fan']['lv2'] = 45
         conf['fan']['lv3'] = 50
+        conf['fan']['source'] = 'cpu'
+        conf['fan']['disk'] = []
         # key
         conf['key']['click'] = 'slider'
         conf['key']['twice'] = 'switch'

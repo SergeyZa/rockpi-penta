@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
+import glob
+import json
 import os.path
+import shutil
+import subprocess
 import time
 import threading
 
@@ -80,10 +84,74 @@ class Gpio:
         self.value[0] = self.period_s - self.value[1]
 
 
-def read_temp():
+def read_cpu_temp():
     with open('/sys/class/thermal/thermal_zone0/temp') as f:
         t = int(f.read().strip()) / 1000.0
     return t
+
+
+def read_disk_temp_sysfs(device):
+    for path in sorted(glob.glob(f'/sys/block/{device}/device/hwmon/hwmon*/temp*_input')):
+        with open(path) as f:
+            return int(f.read().strip()) / 1000.0
+    return None
+
+
+def read_disk_temp_smart(device):
+    smartctl = shutil.which('smartctl')
+    if not smartctl:
+        return None
+
+    result = subprocess.run(
+        [smartctl, '-Aj', f'/dev/{device}'],
+        stderr=subprocess.DEVNULL,
+        text=True,
+        stdout=subprocess.PIPE,
+        check=False,
+    )
+    if not result.stdout:
+        return None
+    return json.loads(result.stdout).get('temperature', {}).get('current')
+
+
+def read_disk_temp(device):
+    try:
+        temp = read_disk_temp_sysfs(device)
+        if temp is not None:
+            return temp
+    except (OSError, ValueError):
+        logger.debug('Disk temperature sysfs read failed for %s', device, exc_info=True)
+
+    try:
+        temp = read_disk_temp_smart(device)
+        if temp is not None:
+            return float(temp)
+    except (OSError, ValueError, subprocess.CalledProcessError, json.JSONDecodeError):
+        logger.debug('Disk temperature SMART read failed for %s', device, exc_info=True)
+
+    return None
+
+
+def read_fan_source_temp():
+    if misc.conf['fan']['source'] != 'disk':
+        temp = read_cpu_temp()
+        return temp, 'cpu', {'cpu': temp}
+
+    disk_temps = {}
+    for device in misc.conf['fan']['disk']:
+        temp = read_disk_temp(device)
+        if temp is not None:
+            disk_temps[device] = temp
+
+    if disk_temps:
+        temp = max(disk_temps.values())
+        return temp, 'disk', disk_temps
+
+    logger.warning(
+        'Disk temperature source selected but no configured disk temperatures were readable; falling back to CPU'
+    )
+    temp = read_cpu_temp()
+    return temp, 'cpu-fallback', {'cpu': temp}
 
 
 def get_dc(cache={}):
@@ -91,11 +159,18 @@ def get_dc(cache={}):
         return 0.999
 
     if time.time() - cache.get('time', 0) > 60:
-        temp = read_temp()
+        temp, source, readings = read_fan_source_temp()
         dc = misc.fan_temp2dc(temp)
         cache['time'] = time.time()
         cache['dc'] = dc
-        logger.debug('Fan reading: temp_c=%.2f target_dc=%.3f run=%s', temp, dc, bool(misc.conf['run'].value))
+        logger.debug(
+            'Fan reading: source=%s readings=%s selected_temp_c=%.2f target_dc=%.3f run=%s',
+            source,
+            readings,
+            temp,
+            dc,
+            bool(misc.conf['run'].value),
+        )
 
     return cache['dc']
 
@@ -111,14 +186,25 @@ def running():
     global pin
     if os.environ['HARDWARE_PWM'] == '1':
         chip = os.environ['PWMCHIP']
-        logger.info('Fan init: mode=hardware pwmchip=%s period_us=40', chip)
+        logger.info(
+            'Fan init: mode=hardware pwmchip=%s period_us=40 source=%s disks=%s',
+            chip,
+            misc.conf['fan']['source'],
+            misc.conf['fan']['disk'],
+        )
         pin = Pwm(chip)
         pin.period_us(40)
         pin.enable(True)
     else:
         chip_path = os.environ['FAN_CHIP']
         line_offset = os.environ['FAN_LINE']
-        logger.info('Fan init: mode=software chip=%s line=%s period_s=0.025', chip_path, line_offset)
+        logger.info(
+            'Fan init: mode=software chip=%s line=%s period_s=0.025 source=%s disks=%s',
+            chip_path,
+            line_offset,
+            misc.conf['fan']['source'],
+            misc.conf['fan']['disk'],
+        )
         pin = Gpio(0.025)
     logger.info('Fan initialization completed')
     while True:
