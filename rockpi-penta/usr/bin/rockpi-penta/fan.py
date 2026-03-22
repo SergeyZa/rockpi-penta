@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
-import glob
-import json
+import errno
 import os.path
-import shutil
-import subprocess
 import time
 import threading
 
@@ -64,16 +61,24 @@ class Gpio:
         if not chip_path.startswith('/dev/'):
             chip_path = f'/dev/gpiochip{chip_path}'
         self.line_offset = int(os.environ['FAN_LINE'])
-        self.line_request = gpiod.request_lines(
-            chip_path,
-            consumer='fan',
-            config={
-                self.line_offset: gpiod.LineSettings(
-                    direction=gpiod.line.Direction.OUTPUT,
-                    output_value=gpiod.line.Value.INACTIVE
-                )
-            }
-        )
+        try:
+            self.line_request = gpiod.request_lines(
+                chip_path,
+                consumer='fan',
+                config={
+                    self.line_offset: gpiod.LineSettings(
+                        direction=gpiod.line.Direction.OUTPUT,
+                        output_value=gpiod.line.Value.INACTIVE
+                    )
+                }
+            )
+        except OSError as ex:
+            if ex.errno == errno.EBUSY:
+                raise RuntimeError(
+                    f'Fan GPIO busy: chip={chip_path} line={self.line_offset}. '
+                    'Another process is likely using the same GPIO.'
+                ) from ex
+            raise
         self.value = [period_s / 2, period_s / 2]
         self.period_s = period_s
         self.thread = threading.Thread(target=self.tr, daemon=True)
@@ -84,95 +89,31 @@ class Gpio:
         self.value[0] = self.period_s - self.value[1]
 
 
-def read_cpu_temp():
-    with open('/sys/class/thermal/thermal_zone0/temp') as f:
-        t = int(f.read().strip()) / 1000.0
-    return t
-
-
-def read_disk_temp_sysfs(device):
-    for path in sorted(glob.glob(f'/sys/block/{device}/device/hwmon/hwmon*/temp*_input')):
-        with open(path) as f:
-            return int(f.read().strip()) / 1000.0
-    return None
-
-
-def read_disk_temp_smart(device):
-    smartctl = shutil.which('smartctl')
-    if not smartctl:
-        return None
-
-    result = subprocess.run(
-        [smartctl, '-Aj', f'/dev/{device}'],
-        stderr=subprocess.DEVNULL,
-        text=True,
-        stdout=subprocess.PIPE,
-        check=False,
-    )
-    if not result.stdout:
-        return None
-    return json.loads(result.stdout).get('temperature', {}).get('current')
-
-
-def read_disk_temp(device):
-    try:
-        temp = read_disk_temp_sysfs(device)
-        if temp is not None:
-            return temp
-    except (OSError, ValueError):
-        logger.debug('Disk temperature sysfs read failed for %s', device, exc_info=True)
-
-    try:
-        temp = read_disk_temp_smart(device)
-        if temp is not None:
-            return float(temp)
-    except (OSError, ValueError, subprocess.CalledProcessError, json.JSONDecodeError):
-        logger.debug('Disk temperature SMART read failed for %s', device, exc_info=True)
-
-    return None
-
-
-def read_fan_source_temp():
-    if misc.conf['fan']['source'] != 'disk':
-        temp = read_cpu_temp()
-        return temp, 'cpu', {'cpu': temp}
-
-    disk_temps = {}
-    for device in misc.conf['fan']['disk']:
-        temp = read_disk_temp(device)
-        if temp is not None:
-            disk_temps[device] = temp
-
-    if disk_temps:
-        temp = max(disk_temps.values())
-        return temp, 'disk', disk_temps
-
-    logger.warning(
-        'Disk temperature source selected but no configured disk temperatures were readable; falling back to CPU'
-    )
-    temp = read_cpu_temp()
-    return temp, 'cpu-fallback', {'cpu': temp}
-
-
-def get_dc(cache={}):
+def get_dc():
     if misc.conf['run'].value == 0:
         return 0.999
 
-    if time.time() - cache.get('time', 0) > 60:
-        temp, source, readings = read_fan_source_temp()
-        dc = misc.fan_temp2dc(temp)
-        cache['time'] = time.time()
-        cache['dc'] = dc
-        logger.debug(
-            'Fan reading: source=%s readings=%s selected_temp_c=%.2f target_dc=%.3f run=%s',
-            source,
-            readings,
-            temp,
-            dc,
-            bool(misc.conf['run'].value),
-        )
+    if misc.conf['fan']['source'] == 'disk':
+        disk_temps = misc.get_cached('disk_temps', {})
+        if disk_temps:
+            temp = max(disk_temps.values())
+            source = 'disk'
+        else:
+            logger.warning(
+                'Disk temperature source selected but no disk temperatures available; falling back to CPU'
+            )
+            temp = misc.get_cached('cpu_temp', 0.0)
+            source = 'cpu-fallback'
+    else:
+        temp = misc.get_cached('cpu_temp', 0.0)
+        source = 'cpu'
 
-    return cache['dc']
+    dc = misc.fan_temp2dc(temp)
+    logger.debug(
+        'Fan reading: source=%s temp_c=%.2f target_dc=%.3f run=%s',
+        source, temp, dc, bool(misc.conf['run'].value),
+    )
+    return dc
 
 
 def change_dc(dc, cache={}):
@@ -184,6 +125,11 @@ def change_dc(dc, cache={}):
 
 def running():
     global pin
+    try:
+        control_interval = max(10, float(misc.conf['cache']['refresh']))
+    except Exception:
+        control_interval = 60.0
+
     if os.environ['HARDWARE_PWM'] == '1':
         chip = os.environ['PWMCHIP']
         logger.info(
@@ -205,11 +151,15 @@ def running():
             misc.conf['fan']['source'],
             misc.conf['fan']['disk'],
         )
-        pin = Gpio(0.025)
-    logger.info('Fan initialization completed')
+        try:
+            pin = Gpio(0.025)
+        except RuntimeError as ex:
+            logger.error('%s', ex)
+            return
+    logger.info('Fan initialization completed: control_interval=%ss', control_interval)
     while True:
         change_dc(get_dc())
-        time.sleep(1)
+        time.sleep(control_interval)
 
 
 if __name__ == '__main__':
