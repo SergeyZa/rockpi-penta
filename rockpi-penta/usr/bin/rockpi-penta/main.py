@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
+import fcntl
+import os
 import queue
+import sys
 import threading
 import time
 
@@ -10,13 +13,25 @@ from logutil import get_logger, setup_logging
 setup_logging(misc.conf['log']['level'])
 logger = get_logger(__name__)
 
-try:
-    import oled
+oled = None
+top_board = False
 
-    top_board = True
-except Exception as ex:
-    logger.exception('OLED import failed, service will run in fan-only mode')
-    top_board = False
+
+def acquire_single_instance_lock():
+    lock_path = os.environ.get('ROCKPI_PENTA_LOCK', '/tmp/rockpi-penta.lock')
+    fd = open(lock_path, 'w')
+    try:
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        logger.error(
+            'Another rockpi-penta instance is already running (lock=%s). '
+            'Stop the service or existing process before starting a second instance.',
+            lock_path,
+        )
+        return None
+    fd.write(str(os.getpid()))
+    fd.flush()
+    return fd
 
 q = queue.Queue()
 lock = threading.Lock()
@@ -39,6 +54,21 @@ def receive_key(q):
 
 
 if __name__ == '__main__':
+    instance_lock = acquire_single_instance_lock()
+    if instance_lock is None:
+        sys.exit(1)
+
+    try:
+        import oled as oled_module
+        oled = oled_module
+        top_board = True
+    except RuntimeError as ex:
+        logger.warning('%s; service will run in fan-only mode', ex)
+        top_board = False
+    except Exception:
+        logger.exception('OLED import failed, service will run in fan-only mode')
+        top_board = False
+
     logger.info('Service startup: top_board=%s log.level=%s', top_board, misc.conf['log']['level'])
 
     if top_board:
@@ -62,6 +92,10 @@ if __name__ == '__main__':
             p2.is_alive(),
             p3.is_alive(),
         )
+        if not p3.is_alive():
+            logger.error(
+                'Fan worker exited during startup. This usually means GPIO/PWM resources are busy.'
+            )
         try:
             logger.info('Startup complete, waiting for fan thread')
             p3.join()
@@ -75,3 +109,7 @@ if __name__ == '__main__':
         p3.start()
         time.sleep(0.2)
         logger.info('Worker liveness: fan=%s', p3.is_alive())
+        if not p3.is_alive():
+            logger.error(
+                'Fan worker exited during startup. Check for a running service or other GPIO users.'
+            )

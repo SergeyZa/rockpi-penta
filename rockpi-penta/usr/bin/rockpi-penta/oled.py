@@ -1,4 +1,5 @@
 #!/usr/bin/python3
+import errno
 import os
 import time
 
@@ -24,7 +25,14 @@ font = {
 def disp_init():
     RESET = getattr(board.pin, os.environ['OLED_RESET'])
     i2c = busio.I2C(getattr(board.pin, os.environ['SCL']), getattr(board.pin, os.environ['SDA']))
-    disp = adafruit_ssd1306.SSD1306_I2C(128, 32, i2c, reset=digitalio.DigitalInOut(RESET))
+    try:
+        disp = adafruit_ssd1306.SSD1306_I2C(128, 32, i2c, reset=digitalio.DigitalInOut(RESET))
+    except OSError as ex:
+        if ex.errno == errno.EBUSY:
+            raise RuntimeError(
+                'OLED GPIO busy during initialization. Another process is likely using the display/reset line.'
+            ) from ex
+        raise
     disp.fill(0)
     disp.show()
     return disp
@@ -83,13 +91,13 @@ def put_disk_info():
 def gen_pages():
     pages = {
         0: [
-            {'xy': (0, -2), 'text': misc.get_info('up'), 'fill': 255, 'font': font['11']},
+            {'xy': (0, -2), 'text': misc.get_cached('up', ''), 'fill': 255, 'font': font['11']},
             {'xy': (0, 10), 'text': misc.get_cpu_temp(), 'fill': 255, 'font': font['11']},
-            {'xy': (0, 21), 'text': misc.get_info('ip'), 'fill': 255, 'font': font['11']},
+            {'xy': (0, 21), 'text': misc.get_cached('ip', ''), 'fill': 255, 'font': font['11']},
         ],
         1: [
-            {'xy': (0, 2), 'text': misc.get_info('cpu'), 'fill': 255, 'font': font['12']},
-            {'xy': (0, 18), 'text': misc.get_info('men'), 'fill': 255, 'font': font['12']},
+            {'xy': (0, 2), 'text': misc.get_cached('cpu', ''), 'fill': 255, 'font': font['12']},
+            {'xy': (0, 18), 'text': misc.get_cached('men', ''), 'fill': 255, 'font': font['12']},
         ],
         2: put_disk_info()
     }
